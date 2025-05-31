@@ -20,22 +20,44 @@ extern "C" {
 }
 
 // C++
-#include <ros/ros.h>
-#include <sensor_msgs/JoyFeedbackArray.h>
+#include <rclcpp/rclcpp.hpp>
+#include <rclcpp_lifecycle/state.hpp>
+#include <rclcpp_lifecycle/lifecycle_node.hpp>
+#include <sensor_msgs/msg/joy_feedback_array.hpp>
 
-class XWiimoteController{
+// ROS
+#include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/float32.hpp>
+#include <sensor_msgs/msg/battery_state.hpp>
+#include <sensor_msgs/msg/joy.hpp>
+#include <wiimote_msgs/msg/state.hpp>
+
+// TODO namespace
+class XWiimoteController : public rclcpp_lifecycle::LifecycleNode {
 public:
-	XWiimoteController(ros::NodeHandle& node, ros::NodeHandle& node_private);
+	explicit XWiimoteController(const std::string & node_name, const rclcpp::NodeOptions &options = rclcpp::NodeOptions());
+
+  CallbackReturn on_configure(const rclcpp_lifecycle::State &) override;
+  CallbackReturn on_activate(const rclcpp_lifecycle::State &) override;
+  CallbackReturn on_deactivate(const rclcpp_lifecycle::State &) override;
+  CallbackReturn on_cleanup(const rclcpp_lifecycle::State &) override;
+  CallbackReturn on_shutdown(const rclcpp_lifecycle::State &) override;
+  CallbackReturn on_error(const rclcpp_lifecycle::State &) override;
+
 	~XWiimoteController();
 	int openInterface();
 	int runInterface();
 	void closeInterface();
 private:
-	ros::NodeHandle node_, nodePrivate_;
-	ros::ServiceServer paramsSrv_;
-	ros::Publisher wiimoteStatePub_, joyPub_, wiimoteNunchukPub_, batteryPub_;
-	ros::Subscriber joySetFeedbackSub_;
-	ros::Time rumbleEnd_;
+	rclcpp_lifecycle::LifecyclePublisher<wiimote_msgs::msg::State>::SharedPtr wiimoteStatePub_;
+  rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::Joy>::SharedPtr joyPub_, wiimoteNunchukPub_;
+  rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::BatteryState>::SharedPtr batteryPub_;
+  std::shared_ptr<rclcpp::Subscription<sensor_msgs::msg::JoyFeedbackArray>> joySetFeedbackSub_;
+	rclcpp::Time rumbleEnd_;
+
+  rclcpp::Logger logger_;
+
+  //std::shared_ptr<ParamListener> param_listener_;
 
 	int deviceIdx_;
 	std::string devicePath_;
@@ -46,7 +68,7 @@ private:
 	float accelerationCal_[3];
 
 	void getParams();
-	void joySetFeedbackCallback(const sensor_msgs::JoyFeedbackArray::ConstPtr& feedback);
+	void joySetFeedbackCallback(sensor_msgs::msg::JoyFeedbackArray::ConstSharedPtr feedback);
 	void publishBattery();
 	void publishJoy();
 	void publishWiimoteState();
