@@ -28,10 +28,28 @@ ament_export_dependencies(
 add_executable(${PROJECT_NAME} src/xwiimote_controller.cpp)
 ament_target_dependencies(${PROJECT_NAME} ${THIS_PACKAGE_INCLUDE_DEPENDS})
 
-
 find_package(PkgConfig)
 pkg_check_modules(LIBXWIIMOTE REQUIRED libxwiimote)
-target_link_libraries(${PROJECT_NAME} libxwiimote)
+
+find_library(XWIIMOTE_LIB xwiimote)
+if(XWIIMOTE_LIB)
+  message(STATUS "Found xwiimote library. ${XWIIMOTE_LIB}")
+else()
+  message(FATAL_ERROR "xwiimote library not found.")
+endif()
+
+
+find_path(XWIIMOTE_INCLUDE_DIR xwiimote.h)
+if(XWIIMOTE_INCLUDE_DIR)
+  message(STATUS "Found xwiimote header. ${XWIIMOTE_INCLUDE_DIR}")
+else()
+  message(FATAL_ERROR "xwiimote header not found.")
+endif()
+
+# Not 100% sure if this is the correct way, but I just want it to link and then its good enough
+target_link_libraries(${PROJECT_NAME} ${XWIIMOTE_LIB})
+target_include_directories(${PROJECT_NAME} INTERFACE ${XWIIMOTE_INCLUDE_DIR})
+
 
 #############
 ## Install ##
@@ -51,16 +69,16 @@ install(
 )
 
 # Install launch files
-install(
-  DIRECTORY launch/
-  DESTINATION share/${PROJECT_NAME}/launch
-)
+#install(
+#  DIRECTORY launch/
+#  DESTINATION share/${PROJECT_NAME}/launch
+#)
 
 # Install config files
-install(
-  DIRECTORY config/
-  DESTINATION share/${PROJECT_NAME}/config
-)
+#install(
+#  DIRECTORY config/
+#  DESTINATION share/${PROJECT_NAME}/config
+#)
 
 ament_export_dependencies(${THIS_PACKAGE_INCLUDE_DEPENDS})
 ament_package()

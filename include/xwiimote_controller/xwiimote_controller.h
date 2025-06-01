@@ -56,6 +56,7 @@ private:
 	rclcpp::Time rumbleEnd_;
 
   rclcpp::Logger logger_;
+  std::shared_ptr<rclcpp::TimerBase> timer_; // for polling events from the wiiremote
 
   //std::shared_ptr<ParamListener> param_listener_;
 

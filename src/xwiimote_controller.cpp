@@ -24,6 +24,7 @@ XWiimoteController::XWiimoteController(const std::string & node_name, const rclc
 {
   //TODO: get namespace from ros args?
   RCLCPP_INFO(logger_, "XWiimote lifecycle node created.");
+  deviceIdx_ = 1; // TODO: get from params
 
 	//getParams();
 	// Initialize Wiimote internal state
@@ -43,6 +44,10 @@ XWiimoteController::on_configure(const rclcpp_lifecycle::State &)
         return this->joySetFeedbackCallback(msg);
         }
       );
+  int ret = openInterface(); // TODO: retry every second?
+  if (ret) {
+    return LifecycleNodeInterface::CallbackReturn::FAILURE;
+  }
 
   return LifecycleNodeInterface::CallbackReturn::SUCCESS;
 }
@@ -56,6 +61,16 @@ XWiimoteController::on_activate(const rclcpp_lifecycle::State &)
   wiimoteStatePub_->on_activate();
   joyPub_->on_activate();
   batteryPub_->on_activate();
+  
+	if(xwii_iface_watch(iface_, true)) {
+		RCLCPP_FATAL(logger_, "Cannot initialize hotplug watch descriptor");
+    return LifecycleNodeInterface::CallbackReturn::FAILURE;
+	}
+	sleep(1);
+  
+  timer_ = this->create_wall_timer(1ms, [this]() { this->runInterface(); });
+  //int ret = runInterface(); // create wall timer for this
+  //RCLCPP_INFO(logger_, "run if returned %d", ret);
 
   return LifecycleNodeInterface::CallbackReturn::SUCCESS;
 }
@@ -64,10 +79,12 @@ rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn
 XWiimoteController::on_deactivate(const rclcpp_lifecycle::State &)
 {
   RCLCPP_INFO(logger_, "Deactivating");
+	closeInterface();
 
   wiimoteStatePub_->on_deactivate();
   joyPub_->on_deactivate();
   batteryPub_->on_deactivate();
+	wiimoteNunchukPub_->on_deactivate();
 
   return LifecycleNodeInterface::CallbackReturn::SUCCESS;
 }
@@ -81,6 +98,7 @@ XWiimoteController::on_cleanup(const rclcpp_lifecycle::State &)
   joyPub_.reset();
   batteryPub_.reset();
   joySetFeedbackSub_.reset();
+  timer_.reset();
 
   return LifecycleNodeInterface::CallbackReturn::SUCCESS;
 }
@@ -103,14 +121,14 @@ XWiimoteController::on_error(const rclcpp_lifecycle::State & previous_state)
   RCLCPP_INFO(
     logger_, "Error handling XWiimoteController. Previous State: %s, id: %d",
     previous_state.label().c_str(), previous_state.id());
-  return LifecycleNodeInterface::CallbackReturn::FAILURE;
+  timer_.reset();
+  closeInterface();
+	initializeWiimoteState();
+  return LifecycleNodeInterface::CallbackReturn::SUCCESS;
 }
 
 /* Delete all parameteres */
 XWiimoteController::~XWiimoteController(){
-	/*nodePrivate_.deleteParam("device_idx");
-	nodePrivate_.deleteParam("device_path");
-	nodePrivate_.deleteParam("wiimote_connected");*/
 }
 
 /* Initialize Wiimote State */
@@ -200,26 +218,21 @@ int XWiimoteController::openInterface(){
 /* Run the wiimote */
 int XWiimoteController::runInterface(){
 	struct xwii_event event;
-	int ret = 0, fds_num;
-	struct pollfd fds[2];
+	int ret = 0; /*, fds_num;
+	struct pollfd fds[2];*/
 
-	memset(fds, 0, sizeof(fds));
+	/*memset(fds, 0, sizeof(fds));
 	fds[0].fd = 0;
 	fds[0].events = POLLIN;
 	fds[1].fd = xwii_iface_get_fd(iface_);
 	fds[1].events = POLLIN;
-	fds_num = 2;
+	fds_num = 2;*/
 
-	if(xwii_iface_watch(iface_, true)) {
-		RCLCPP_FATAL(logger_, "Cannot initialize hotplug watch descriptor");
-		return false;
-	}
 
 	//nodePrivate_.setParam("wiimote_connected", true);
 
 	// Give the hardware time to zero the accelerometer and gyro after pairing
 	// Ensure we are getting valid data before using
-	sleep(1);
 
 	/*checkFactoryCalibrationData();
 	if (!wiimoteCalibrated_){
@@ -229,226 +242,224 @@ int XWiimoteController::runInterface(){
 	unsigned int code;
 	float x, y, accex, accey, accez, naccex, naccey, naccez;
 	bool pressed, needPub = false;
-	while (rclcpp::ok()) {
-		ret = poll(fds, fds_num, -1);
-		if (ret < 0) {
-			if (errno != EINTR) {
-				ret = -errno;
-				RCLCPP_FATAL(logger_, "Cannot poll fds: %d", ret);
-				break;
-			}
-		}
 
-		ret = xwii_iface_dispatch(iface_, &event, sizeof(event));
-		if (ret) {
-			if (ret != -EAGAIN)
-			RCLCPP_ERROR(logger_, "Read failed with err:%d", ret);
-			continue;
-		}
-		switch (event.type) {
-			case XWII_EVENT_GONE:
-				RCLCPP_WARN(logger_, "Device gone");
-				//nodePrivate_.setParam("wiimote_connected", false);
-				fds[1].fd = -1;
-				fds[1].events = 0;
-				fds_num = 1;
-				exit(1);
-				break;
-			case XWII_EVENT_NUNCHUK_KEY:
-			case XWII_EVENT_KEY:
-				needPub = true;
-				code = event.v.key.code;
-				pressed = event.v.key.state;
-				switch (code) {
-					case XWII_KEY_ONE:
-						buttons_[0] = pressed;
-						break;
-					case XWII_KEY_TWO:
-						buttons_[1] = pressed;
-						break;
-					case XWII_KEY_A:
-						buttons_[2] = pressed;
-						break;
-					case XWII_KEY_B:
-						buttons_[3] = pressed;
-						break;
-					case XWII_KEY_PLUS:
-						buttons_[4] = pressed;
-						break;
-					case XWII_KEY_MINUS:
-						buttons_[5] = pressed;
-						break;
-					case XWII_KEY_LEFT:
-						buttons_[6] = -pressed;
-						break;
-					case XWII_KEY_RIGHT:
-						buttons_[7] =  pressed;
-						break;
-					case XWII_KEY_UP:
-						buttons_[8] =  pressed;
-						break;
-					case XWII_KEY_DOWN:
-						buttons_[9] = -pressed;
-						break;
-					case XWII_KEY_HOME:
-						buttons_[10] = pressed;
-						break;
-					case XWII_KEY_Z:
-						nunchukButtons_[0] = pressed;
-						break;
-					case XWII_KEY_C:
-						nunchukButtons_[1] = pressed;
-						break;
-					default:
-						needPub = false;
-						break;
-				}
-				break;
-			case XWII_EVENT_NUNCHUK_MOVE:
-				RCLCPP_DEBUG_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_NUNCHUK_MOVE:%i, %i", event.v.abs[0].x, event.v.abs[0].y);
-				needPub = true;
-				x = 0.01 * event.v.abs[0].x;
-				if (x < -1)
-					x = -1;
-				else if (x > 1)
-					x = 1;
-				// Create a deadzone in the center
-				if (fabs(x) <= 0.05){
-					nunchukJoystick_[0] = 0.0;
-				}else{
-					nunchukJoystick_[0] = x;
-				}
+  /*ret = poll(fds, fds_num, -1);
+  if (ret < 0) {
+    if (errno != EINTR) {
+      ret = -errno;
+      RCLCPP_FATAL(logger_, "Cannot poll fds: %d", ret);
+      return ret;
+    }
+  }*/
 
-				y = 0.01 * event.v.abs[0].y;
-				if (y < -1)
-					y = -1;
-				else if (y > 1)
-					y = 1;
-				// Create a deadzone in the center
-				if (fabs(y) <= 0.07){
-					nunchukJoystick_[1] = 0.0;
-				}else{
-					nunchukJoystick_[1] = y;
-				}
+  ret = xwii_iface_dispatch(iface_, &event, sizeof(event));
+  if (ret) {
+    if (ret != -EAGAIN)
+    RCLCPP_ERROR(logger_, "Read failed with err:%d", ret);
+    return ret;
+  }
+  switch (event.type) {
+    case XWII_EVENT_GONE:
+      RCLCPP_WARN(logger_, "Device gone.");
+      deactivate();
+      //nodePrivate_.setParam("wiimote_connected", false);
+      /*fds[1].fd = -1;
+      fds[1].events = 0;
+      fds_num = 1;*/
+      exit(1);
+      break;
+    case XWII_EVENT_NUNCHUK_KEY:
+    case XWII_EVENT_KEY:
+      needPub = true;
+      code = event.v.key.code;
+      pressed = event.v.key.state;
+      switch (code) {
+        case XWII_KEY_ONE:
+          buttons_[0] = pressed;
+          break;
+        case XWII_KEY_TWO:
+          buttons_[1] = pressed;
+          break;
+        case XWII_KEY_A:
+          buttons_[2] = pressed;
+          break;
+        case XWII_KEY_B:
+          buttons_[3] = pressed;
+          break;
+        case XWII_KEY_PLUS:
+          buttons_[4] = pressed;
+          break;
+        case XWII_KEY_MINUS:
+          buttons_[5] = pressed;
+          break;
+        case XWII_KEY_LEFT:
+          buttons_[6] = -pressed;
+          break;
+        case XWII_KEY_RIGHT:
+          buttons_[7] =  pressed;
+          break;
+        case XWII_KEY_UP:
+          buttons_[8] =  pressed;
+          break;
+        case XWII_KEY_DOWN:
+          buttons_[9] = -pressed;
+          break;
+        case XWII_KEY_HOME:
+          buttons_[10] = pressed;
+          break;
+        case XWII_KEY_Z:
+          nunchukButtons_[0] = pressed;
+          break;
+        case XWII_KEY_C:
+          nunchukButtons_[1] = pressed;
+          break;
+        default:
+          needPub = false;
+          break;
+      }
+      break;
+    case XWII_EVENT_NUNCHUK_MOVE:
+      RCLCPP_DEBUG_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_NUNCHUK_MOVE:%i, %i", event.v.abs[0].x, event.v.abs[0].y);
+      needPub = true;
+      x = 0.01 * event.v.abs[0].x;
+      if (x < -1)
+        x = -1;
+      else if (x > 1)
+        x = 1;
+      // Create a deadzone in the center
+      if (fabs(x) <= 0.05){
+        nunchukJoystick_[0] = 0.0;
+      }else{
+        nunchukJoystick_[0] = x;
+      }
 
-				naccex = event.v.abs[1].x;
-				/*naccex /= 512;
-				if (naccex >= 0)
-					naccex = 10 * pow(naccex, 0.25);
-				else
-					accex = -10 * pow(-naccex, 0.25);*/
-				nunchuckAcceleration_[0] = naccex;
+      y = 0.01 * event.v.abs[0].y;
+      if (y < -1)
+        y = -1;
+      else if (y > 1)
+        y = 1;
+      // Create a deadzone in the center
+      if (fabs(y) <= 0.07){
+        nunchukJoystick_[1] = 0.0;
+      }else{
+        nunchukJoystick_[1] = y;
+      }
 
-				naccey = event.v.abs[1].y;
-				/*naccey /= 512;
-				if (naccey >= 0)
-					naccey = 5 * pow(naccey, 0.25);
-				else
-					naccey = -5 * pow(-naccey, 0.25);*/
-				nunchuckAcceleration_[1] = naccey;
+      naccex = event.v.abs[1].x;
+      /*naccex /= 512;
+      if (naccex >= 0)
+        naccex = 10 * pow(naccex, 0.25);
+      else
+        accex = -10 * pow(-naccex, 0.25);*/
+      nunchuckAcceleration_[0] = naccex;
 
-				naccez = event.v.abs[1].z;
-				/*naccez /= 512;
-				if (naccez >= 0)
-					naccez = 5 * pow(naccez, 0.25);
-				else
-					naccez = -5 * pow(-naccez, 0.25);*/
-				nunchuckAcceleration_[2] = naccez;
-				break;
+      naccey = event.v.abs[1].y;
+      /*naccey /= 512;
+      if (naccey >= 0)
+        naccey = 5 * pow(naccey, 0.25);
+      else
+        naccey = -5 * pow(-naccey, 0.25);*/
+      nunchuckAcceleration_[1] = naccey;
+
+      naccez = event.v.abs[1].z;
+      /*naccez /= 512;
+      if (naccez >= 0)
+        naccez = 5 * pow(naccez, 0.25);
+      else
+        naccez = -5 * pow(-naccez, 0.25);*/
+      nunchuckAcceleration_[2] = naccez;
+      break;
 //#if 0
-			case XWII_EVENT_WATCH:
-				RCLCPP_DEBUG_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_WATCH");
-				break;
-			case XWII_EVENT_ACCEL:
-				RCLCPP_DEBUG_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_ACCEL");
-				needPub = true;
-				accex = event.v.abs[0].x;
-				/*accex /= 512;
-				if (accex >= 0)
-					accex = 10 * pow(accex, 0.25);
-				else
-					accex = -10 * pow(-accex, 0.25);*/
-				acceleration_[0] = accex;
+    case XWII_EVENT_WATCH:
+      RCLCPP_DEBUG_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_WATCH");
+      break;
+    case XWII_EVENT_ACCEL:
+      RCLCPP_DEBUG_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_ACCEL");
+      needPub = true;
+      accex = event.v.abs[0].x;
+      /*accex /= 512;
+      if (accex >= 0)
+        accex = 10 * pow(accex, 0.25);
+      else
+        accex = -10 * pow(-accex, 0.25);*/
+      acceleration_[0] = accex;
 
-				accey = event.v.abs[0].y;
-				/*accey /= 512;
-				if (accey >= 0)
-					accey = 5 * pow(accey, 0.25);
-				else
-					accey = -5 * pow(-accey, 0.25);*/
-				acceleration_[1] = accey;
+      accey = event.v.abs[0].y;
+      /*accey /= 512;
+      if (accey >= 0)
+        accey = 5 * pow(accey, 0.25);
+      else
+        accey = -5 * pow(-accey, 0.25);*/
+      acceleration_[1] = accey;
 
-				accez = event.v.abs[0].z;
-				/*accez /= 512;
-				if (accez >= 0)
-					accez = 5 * pow(accez, 0.25);
-				else
-					accez = -5 * pow(-accez, 0.25);*/
-				acceleration_[2] = accez;
-				break;
-			case XWII_EVENT_IR:
-				RCLCPP_INFO_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_IR");
-				break;
-			case XWII_EVENT_MOTION_PLUS:
-				//RCLCPP_INFO_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_MOTION_PLUS");
-				needPub = true;
-				angularVelocity_[0] = event.v.abs[0].x;
-				angularVelocity_[1] = event.v.abs[0].y;
-				angularVelocity_[2] = event.v.abs[0].z;	
-				break;
-			case XWII_EVENT_CLASSIC_CONTROLLER_KEY:
-				RCLCPP_INFO_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_CLASSIC_CONTROLLER_KEY");
-				break;
-			case XWII_EVENT_CLASSIC_CONTROLLER_MOVE:
-				RCLCPP_INFO_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_CLASSIC_CONTROLLER_MOVE");
-				break;
-			case XWII_EVENT_BALANCE_BOARD:
-				RCLCPP_INFO_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_BALANCE_BOARD");
-				break;
-			case XWII_EVENT_PRO_CONTROLLER_KEY:
-				RCLCPP_INFO_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_PRO_CONTROLLER_KEY");
-				break;
-			case XWII_EVENT_PRO_CONTROLLER_MOVE:
-				RCLCPP_INFO_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_WAXWII_EVENT_PRO_CONTROLLER_MOVETCH");
-				break;
-			case XWII_EVENT_GUITAR_KEY:
-				RCLCPP_INFO_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_GUITAR_KEY");
-				break;
-			case XWII_EVENT_GUITAR_MOVE:
-				RCLCPP_INFO_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_GUITAR_MOVE");
-				break;
-			case XWII_EVENT_DRUMS_KEY:
-				RCLCPP_INFO_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_DRUMS_KEY");
-				break;
-			case XWII_EVENT_DRUMS_MOVE:
-				RCLCPP_INFO_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_DRUMS_MOVE");
-				break;
+      accez = event.v.abs[0].z;
+      /*accez /= 512;
+      if (accez >= 0)
+        accez = 5 * pow(accez, 0.25);
+      else
+        accez = -5 * pow(-accez, 0.25);*/
+      acceleration_[2] = accez;
+      break;
+    case XWII_EVENT_IR:
+      RCLCPP_INFO_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_IR");
+      break;
+    case XWII_EVENT_MOTION_PLUS:
+      //RCLCPP_INFO_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_MOTION_PLUS");
+      needPub = true;
+      angularVelocity_[0] = event.v.abs[0].x;
+      angularVelocity_[1] = event.v.abs[0].y;
+      angularVelocity_[2] = event.v.abs[0].z;	
+      break;
+    case XWII_EVENT_CLASSIC_CONTROLLER_KEY:
+      RCLCPP_INFO_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_CLASSIC_CONTROLLER_KEY");
+      break;
+    case XWII_EVENT_CLASSIC_CONTROLLER_MOVE:
+      RCLCPP_INFO_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_CLASSIC_CONTROLLER_MOVE");
+      break;
+    case XWII_EVENT_BALANCE_BOARD:
+      RCLCPP_INFO_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_BALANCE_BOARD");
+      break;
+    case XWII_EVENT_PRO_CONTROLLER_KEY:
+      RCLCPP_INFO_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_PRO_CONTROLLER_KEY");
+      break;
+    case XWII_EVENT_PRO_CONTROLLER_MOVE:
+      RCLCPP_INFO_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_WAXWII_EVENT_PRO_CONTROLLER_MOVETCH");
+      break;
+    case XWII_EVENT_GUITAR_KEY:
+      RCLCPP_INFO_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_GUITAR_KEY");
+      break;
+    case XWII_EVENT_GUITAR_MOVE:
+      RCLCPP_INFO_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_GUITAR_MOVE");
+      break;
+    case XWII_EVENT_DRUMS_KEY:
+      RCLCPP_INFO_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_DRUMS_KEY");
+      break;
+    case XWII_EVENT_DRUMS_MOVE:
+      RCLCPP_INFO_THROTTLE(logger_, *get_clock(), 1000, "XWII_EVENT_DRUMS_MOVE");
+      break;
 //#endif
-			default:
-				break;
-		} // end switch
+    default:
+      break;
+  } // end switch
 
-		// Check rumble end
-		/*if(rumbleState_ && now() > rumbleEnd_) {
-			toggleRumble(false);
-			rumbleState_ = false;
-		}*/
+  // Check rumble end
+  /*if(rumbleState_ && now() > rumbleEnd_) {
+    toggleRumble(false);
+    rumbleState_ = false;
+  }*/
 
-		// Check leds
-		readLed();
+  // Check leds
+  readLed();
 
-		// Check Battery
-		readBattery();
+  // Check Battery
+  readBattery();
 
-		if(needPub) {
-			publishJoy();
-			publishWiimoteState();
-			publishWiimoteNunchuk();
-			publishBattery();
-		}
-
-    //rclcpp::spin_all(this, 0s);
-	}
+  if(needPub) {
+    publishJoy();
+    publishWiimoteState();
+    publishWiimoteNunchuk();
+    publishBattery();
+  }
 
 	return ret;
 }
@@ -636,7 +647,8 @@ void XWiimoteController::publishWiimoteNunchuk(){
 	if(isPresentNunchuk()){
 		// Is the Nunchuk publisher not advertised?
 		if(nullptr == wiimoteNunchukPub_){
-			//wiimoteNunchukPub_ = create_publisher<sensor_msgs::msg::Joy>("nunchuk", 1);
+			wiimoteNunchukPub_ = create_publisher<sensor_msgs::msg::Joy>("nunchuk", 1);
+			wiimoteNunchukPub_->on_activate();
 		}
 	}else{
 		// Is the Nunchuk publisher advertised?
@@ -926,8 +938,5 @@ int main(int argc, char **argv) {
 
   return 0;
 
-//			int ret = wiimotenode.openInterface(); // try every second
-	//			int ret = wiimotenode.runInterface();
-		//wiimotenode.closeInterface();
 
 }
